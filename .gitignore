@@ -1,0 +1,19 @@
+# Build artifacts
+target/
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+
+# Test files (not distributed — users provide their own)
+test_files/
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
