@@ -20,6 +20,12 @@ pub enum DecodeError {
     #[error("invalid frame data at frame {frame}: {detail}")]
     InvalidFrame { frame: usize, detail: String },
 
+    #[error("truncated data: {0}")]
+    Truncated(String),
+
+    #[error("streaming decoder is already finished")]
+    AlreadyFinished,
+
     #[error("WAV write error: {0}")]
     Wav(#[from] hound::Error),
 
