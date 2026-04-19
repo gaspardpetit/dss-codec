@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Native DSS/DS2 audio decoder (Olympus Digital Speech Standard)"
 license = "MIT"
+homepage = "https://github.com/gaspardpetit/dss-codec"
+repository = "https://github.com/gaspardpetit/dss-codec"
+documentation = "https://github.com/gaspardpetit/dss-codec#readme"
 
 [[bin]]
 name = "dss-decode"
