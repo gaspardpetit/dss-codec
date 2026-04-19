@@ -7,6 +7,7 @@ pub mod output;
 pub mod streaming;
 pub mod tables;
 
+use crate::crypto::ds2_encrypted::ENCRYPTED_MAGIC;
 use crate::demux::{detect_format, AudioFormat};
 use crate::error::{DecodeError, Result};
 use crate::output::resample::resample;
@@ -24,6 +25,29 @@ pub struct AudioBuffer {
     pub native_rate: u32,
     /// Detected format
     pub format: AudioFormat,
+}
+
+/// Lightweight file/container inspection result.
+pub struct FileInfo {
+    /// Detected audio format.
+    pub format: AudioFormat,
+    /// Encryption metadata for the container.
+    pub encryption: EncryptionInfo,
+}
+
+impl FileInfo {
+    pub fn native_rate(&self) -> u32 {
+        self.format.native_sample_rate()
+    }
+}
+
+/// Encryption metadata detected from the file/container header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptionInfo {
+    None,
+    EncryptedDs2Aes128,
+    EncryptedDs2Aes256,
+    EncryptedUnknown(u16),
 }
 
 /// Normalize a DSS/DS2 file to plain container bytes.
@@ -44,6 +68,40 @@ pub fn decrypt_to_bytes(data: &[u8], password: Option<&[u8]>) -> Result<Vec<u8>>
     let mut plain = decryptor.push(data)?;
     plain.extend(decryptor.finish()?);
     Ok(plain)
+}
+
+/// Inspect a DSS/DS2 file and report format/encryption metadata.
+pub fn inspect_file(path: &Path) -> Result<FileInfo> {
+    let data = std::fs::read(path)?;
+    inspect_bytes(&data)
+}
+
+/// Inspect raw DSS/DS2 bytes and report format/encryption metadata.
+pub fn inspect_bytes(data: &[u8]) -> Result<FileInfo> {
+    let format =
+        detect_format(data).ok_or_else(|| DecodeError::UnsupportedFormat(data.first().copied().unwrap_or(0)))?;
+
+    if data.starts_with(&ENCRYPTED_MAGIC) {
+        let mode = data
+            .get(crate::crypto::ds2_encrypted::DECRYPT_DESCRIPTOR_OFFSET..crate::crypto::ds2_encrypted::DECRYPT_DESCRIPTOR_OFFSET + 2)
+            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .ok_or_else(|| DecodeError::EncryptedDs2("missing decrypt descriptor".to_string()))?;
+
+        let encryption = match mode {
+            1 => EncryptionInfo::EncryptedDs2Aes128,
+            2 => EncryptionInfo::EncryptedDs2Aes256,
+            other => EncryptionInfo::EncryptedUnknown(other),
+        };
+        Ok(FileInfo {
+            format,
+            encryption,
+        })
+    } else {
+        Ok(FileInfo {
+            format,
+            encryption: EncryptionInfo::None,
+        })
+    }
 }
 
 /// Decode a DSS/DS2 file to an AudioBuffer.
