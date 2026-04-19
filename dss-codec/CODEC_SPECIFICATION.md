@@ -1265,7 +1265,7 @@ All codebook data is embedded as `const` arrays (no runtime file dependencies). 
 dss-codec/
   Cargo.toml              # clap 4, thiserror 2, hound 3, rubato 0.16
   src/
-    lib.rs                 # Public API: decode_file(), decode_to_buffer(), decode_and_write()
+    lib.rs                 # Public API: decrypt_file(), decode_file(), decode_to_buffer(), decode_and_write()
     main.rs                # CLI binary: dss-decode
     error.rs               # DecodeError enum
     bitstream.rs           # BitstreamReader (MSB-first within 16-bit LE words)
@@ -1296,7 +1296,16 @@ dss-codec/
 ### Public Library API
 
 ```rust
-use dss_codec::{decode_file, decode_to_buffer, decode_and_write, AudioBuffer};
+use dss_codec::{
+    decode_file,
+    decode_file_with_password,
+    decode_to_buffer,
+    decode_to_buffer_with_password,
+    decode_and_write,
+    decrypt_file,
+    decrypt_to_bytes,
+    AudioBuffer,
+};
 use dss_codec::demux::{detect_format, AudioFormat};
 use dss_codec::output::OutputConfig;
 
@@ -1308,6 +1317,14 @@ let buf: AudioBuffer = decode_file(Path::new("recording.ds2"))?;
 let data = std::fs::read("recording.dss")?;
 let buf = decode_to_buffer(&data)?;
 
+// Decode encrypted DS2 with a password
+let encrypted = std::fs::read("encrypted.ds2")?;
+let buf = decode_to_buffer_with_password(&encrypted, Some(b"1234"))?;
+
+// Normalize to plain container bytes (plain input passes through unchanged)
+let plain_ds2 = decrypt_file(Path::new("encrypted.ds2"), Some(b"1234"))?;
+let plain_bytes = decrypt_to_bytes(&encrypted, Some(b"1234"))?;
+
 // Decode and write WAV
 let config = OutputConfig { sample_rate: Some(16000), bit_depth: 16, channels: 1 };
 decode_and_write(Path::new("in.ds2"), Path::new("out.wav"), &config)?;
@@ -1318,16 +1335,18 @@ decode_and_write(Path::new("in.ds2"), Path::new("out.wav"), &config)?;
 ```
 dss-decode [OPTIONS] <INPUT...>
 
-Options:
-  -O, --output-file <PATH>   Output file (single input mode)
-  -f, --format <FORMAT>      Output format [default: wav]
-  -r, --rate <HZ>            Output sample rate [default: native]
-  -b, --bits <16|24|32>      Bit depth [default: 16]
-  -c, --channels <1|2>       Channels [default: 1]
-  -o, --output-dir <DIR>     Batch output directory
-  -q, --quiet                Suppress status output
-      --info                 Print file metadata only
-```
+  Options:
+    -O, --output-file <PATH>   Output file (single input mode)
+    -f, --format <FORMAT>      Output format [default: wav]
+    -r, --rate <HZ>            Output sample rate [default: native]
+    -b, --bits <16|24|32>      Bit depth [default: 16]
+    -c, --channels <1|2>       Channels [default: 1]
+    -o, --output-dir <DIR>     Batch output directory
+    -q, --quiet                Suppress status output
+        --decrypt              Save decrypted/plain container bytes instead of WAV
+        --password <PASSWORD>  Password for encrypted DS2 input
+        --info                 Print file metadata only
+  ```
 
 ---
 
