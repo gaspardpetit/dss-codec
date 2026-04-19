@@ -1,6 +1,7 @@
 use crate::codec::ds2_qp::Ds2QpDecoder;
 use crate::codec::ds2_sp::Ds2SpDecoder;
 use crate::codec::dss_sp::DssSpDecoder;
+use crate::crypto::ds2_encrypted::EncryptedDs2StreamDecryptor;
 use crate::demux::ds2::{Ds2QpStreamDemuxer, Ds2SpStreamDemuxer};
 use crate::demux::dss::DssSpStreamDemuxer;
 use crate::demux::{detect_format, AudioFormat};
@@ -11,6 +12,12 @@ pub struct StreamingDecoder {
     format: Option<AudioFormat>,
     demuxer: Option<ActiveDemuxer>,
     decoder: Option<ActiveDecoder>,
+    finished: bool,
+}
+
+pub struct EncryptedStreamingDecoder {
+    decryptor: EncryptedDs2StreamDecryptor,
+    inner: StreamingDecoder,
     finished: bool,
 }
 
@@ -237,6 +244,51 @@ impl StreamingDecoder {
     }
 }
 
+impl EncryptedStreamingDecoder {
+    pub fn new(password: &[u8]) -> Self {
+        Self {
+            decryptor: EncryptedDs2StreamDecryptor::new(password),
+            inner: StreamingDecoder::new(),
+            finished: false,
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<f64>> {
+        if self.finished {
+            return Err(DecodeError::AlreadyFinished);
+        }
+
+        let plain = self.decryptor.push(bytes)?;
+        self.inner.push(&plain)
+    }
+
+    pub fn finish(&mut self) -> Result<Vec<f64>> {
+        if self.finished {
+            return Ok(Vec::new());
+        }
+
+        let plain = self.decryptor.finish()?;
+        let mut samples = self.inner.push(&plain)?;
+        samples.extend(self.inner.finish()?);
+        self.finished = true;
+        Ok(samples)
+    }
+
+    pub fn format(&self) -> Option<AudioFormat> {
+        self.inner.format()
+    }
+
+    pub fn native_rate(&self) -> Option<u32> {
+        self.inner.native_rate()
+    }
+}
+
+impl Default for EncryptedStreamingDecoder {
+    fn default() -> Self {
+        Self::new(&[])
+    }
+}
+
 impl Default for StreamingDecoder {
     fn default() -> Self {
         Self::new()
@@ -286,5 +338,12 @@ mod tests {
 
         let err = decoder.push(b"\x03ds2").unwrap_err();
         assert!(matches!(err, DecodeError::AlreadyFinished));
+    }
+
+    #[test]
+    fn encrypted_streaming_decoder_non_encrypted_prefix_errors() {
+        let mut decoder = EncryptedStreamingDecoder::new(b"1234");
+        let err = decoder.push(b"\x03ds2").unwrap_err();
+        assert!(matches!(err, DecodeError::EncryptedDs2(_)));
     }
 }
