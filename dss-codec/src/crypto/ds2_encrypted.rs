@@ -51,7 +51,7 @@ struct PayloadDecryptState {
     blob: [u8; SAVED_STATE_SIZE],
 }
 
-pub(crate) struct EncryptedDs2StreamDecryptor {
+pub(crate) struct EncryptedDs2BlockDecryptor {
     password: Vec<u8>,
     header_buf: Vec<u8>,
     block_buf: Vec<u8>,
@@ -67,7 +67,7 @@ impl Default for PayloadDecryptState {
     }
 }
 
-impl EncryptedDs2StreamDecryptor {
+impl EncryptedDs2BlockDecryptor {
     pub(crate) fn new(password: &[u8]) -> Self {
         Self {
             password: password.to_vec(),
@@ -729,7 +729,7 @@ mod tests {
         input[DECRYPT_DESCRIPTOR_OFFSET..DECRYPT_DESCRIPTOR_OFFSET + DECRYPT_DESCRIPTOR_SIZE]
             .copy_from_slice(&DESC_128);
 
-        let mut decryptor = EncryptedDs2StreamDecryptor::new(b"1234");
+        let mut decryptor = EncryptedDs2BlockDecryptor::new(b"1234");
         assert!(decryptor.push(&input[..128]).unwrap().is_empty());
         let plain = decryptor.push(&input[128..]).unwrap();
         assert_eq!(&plain[..4], &PLAIN_MAGIC);
@@ -743,14 +743,14 @@ mod tests {
         input[DECRYPT_DESCRIPTOR_OFFSET..DECRYPT_DESCRIPTOR_OFFSET + DECRYPT_DESCRIPTOR_SIZE]
             .copy_from_slice(&DESC_128);
 
-        let mut decryptor = EncryptedDs2StreamDecryptor::new(b"9999");
+        let mut decryptor = EncryptedDs2BlockDecryptor::new(b"9999");
         let err = decryptor.push(&input).unwrap_err();
         assert!(matches!(err, DecodeError::EncryptedDs2(_)));
     }
 
     #[test]
     fn encrypted_stream_decryptor_finish_rejects_truncated_header() {
-        let mut decryptor = EncryptedDs2StreamDecryptor::new(b"1234");
+        let mut decryptor = EncryptedDs2BlockDecryptor::new(b"1234");
         let _ = decryptor.push(b"\x03enc").unwrap();
         let err = decryptor.finish().unwrap_err();
         assert!(matches!(err, DecodeError::Truncated(_)));
@@ -763,7 +763,7 @@ mod tests {
         input[DECRYPT_DESCRIPTOR_OFFSET..DECRYPT_DESCRIPTOR_OFFSET + DECRYPT_DESCRIPTOR_SIZE]
             .copy_from_slice(&DESC_128);
 
-        let mut decryptor = EncryptedDs2StreamDecryptor::new(b"1234");
+        let mut decryptor = EncryptedDs2BlockDecryptor::new(b"1234");
         let _ = decryptor.push(&input).unwrap();
         let _ = decryptor.push(&[0u8; 10]).unwrap();
         let err = decryptor.finish().unwrap_err();

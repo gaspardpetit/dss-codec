@@ -1,7 +1,7 @@
 use crate::codec::ds2_qp::Ds2QpDecoder;
 use crate::codec::ds2_sp::Ds2SpDecoder;
 use crate::codec::dss_sp::DssSpDecoder;
-use crate::crypto::ds2_encrypted::EncryptedDs2StreamDecryptor;
+use crate::crypto::ds2_encrypted::{EncryptedDs2BlockDecryptor, ENCRYPTED_MAGIC};
 use crate::demux::ds2::{Ds2QpStreamDemuxer, Ds2SpStreamDemuxer};
 use crate::demux::dss::DssSpStreamDemuxer;
 use crate::demux::{detect_format, AudioFormat};
@@ -15,10 +15,22 @@ pub struct StreamingDecoder {
     finished: bool,
 }
 
-pub struct EncryptedStreamingDecoder {
-    decryptor: EncryptedDs2StreamDecryptor,
+pub struct DecryptStreamer {
+    password: Option<Vec<u8>>,
+    prebuffer: Vec<u8>,
+    mode: DecryptMode,
+}
+
+pub struct DecryptingDecoderStreamer {
+    decryptor: DecryptStreamer,
     inner: StreamingDecoder,
     finished: bool,
+}
+
+enum DecryptMode {
+    Unknown,
+    PassThrough,
+    Encrypted(EncryptedDs2BlockDecryptor),
 }
 
 enum ActiveDemuxer {
@@ -244,10 +256,80 @@ impl StreamingDecoder {
     }
 }
 
-impl EncryptedStreamingDecoder {
-    pub fn new(password: &[u8]) -> Self {
+impl DecryptStreamer {
+    pub fn new(password: Option<&[u8]>) -> Self {
         Self {
-            decryptor: EncryptedDs2StreamDecryptor::new(password),
+            password: password.map(|value| value.to_vec()),
+            prebuffer: Vec::new(),
+            mode: DecryptMode::Unknown,
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<u8>> {
+        match &mut self.mode {
+            DecryptMode::PassThrough => Ok(bytes.to_vec()),
+            DecryptMode::Encrypted(decryptor) => decryptor.push(bytes),
+            DecryptMode::Unknown => {
+                self.prebuffer.extend_from_slice(bytes);
+                if self.prebuffer.len() < 4 {
+                    return Ok(Vec::new());
+                }
+
+                if self.prebuffer.starts_with(&ENCRYPTED_MAGIC) {
+                    let password = self.password.as_deref().ok_or_else(|| {
+                        DecodeError::EncryptedDs2(
+                            "password required for encrypted DS2 input".to_string(),
+                        )
+                    })?;
+                    let mut decryptor = EncryptedDs2BlockDecryptor::new(password);
+                    let buffered = std::mem::take(&mut self.prebuffer);
+                    let plain = decryptor.push(&buffered)?;
+                    self.mode = DecryptMode::Encrypted(decryptor);
+                    return Ok(plain);
+                }
+
+                if is_plain_prefix(&self.prebuffer) {
+                    let buffered = std::mem::take(&mut self.prebuffer);
+                    self.mode = DecryptMode::PassThrough;
+                    return Ok(buffered);
+                }
+
+                Err(DecodeError::UnsupportedFormat(
+                    self.prebuffer.first().copied().unwrap_or(0),
+                ))
+            }
+        }
+    }
+
+    pub fn finish(&mut self) -> Result<Vec<u8>> {
+        match &mut self.mode {
+            DecryptMode::PassThrough => Ok(std::mem::take(&mut self.prebuffer)),
+            DecryptMode::Encrypted(decryptor) => decryptor.finish(),
+            DecryptMode::Unknown => {
+                if self.prebuffer.is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                if ENCRYPTED_MAGIC.starts_with(&self.prebuffer) {
+                    return Err(DecodeError::Truncated("encrypted DS2 header".to_string()));
+                }
+
+                if self.prebuffer.len() >= 4 && !is_plain_prefix(&self.prebuffer) {
+                    return Err(DecodeError::UnsupportedFormat(
+                        self.prebuffer.first().copied().unwrap_or(0),
+                    ));
+                }
+
+                Ok(std::mem::take(&mut self.prebuffer))
+            }
+        }
+    }
+}
+
+impl DecryptingDecoderStreamer {
+    pub fn new(password: Option<&[u8]>) -> Self {
+        Self {
+            decryptor: DecryptStreamer::new(password),
             inner: StreamingDecoder::new(),
             finished: false,
         }
@@ -281,11 +363,23 @@ impl EncryptedStreamingDecoder {
     pub fn native_rate(&self) -> Option<u32> {
         self.inner.native_rate()
     }
+
+    pub(crate) fn finish_lenient(&mut self) -> Result<Vec<f64>> {
+        if self.finished {
+            return Ok(Vec::new());
+        }
+
+        let plain = self.decryptor.finish()?;
+        let mut samples = self.inner.push(&plain)?;
+        samples.extend(self.inner.finish_lenient()?);
+        self.finished = true;
+        Ok(samples)
+    }
 }
 
-impl Default for EncryptedStreamingDecoder {
+impl Default for DecryptingDecoderStreamer {
     fn default() -> Self {
-        Self::new(&[])
+        Self::new(None)
     }
 }
 
@@ -293,6 +387,11 @@ impl Default for StreamingDecoder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn is_plain_prefix(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x03ds2")
+        || (bytes.len() >= 4 && bytes[1..4] == *b"dss" && (bytes[0] == 2 || bytes[0] == 3))
 }
 
 #[cfg(test)]
@@ -341,9 +440,44 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_streaming_decoder_non_encrypted_prefix_errors() {
-        let mut decoder = EncryptedStreamingDecoder::new(b"1234");
+    fn decrypt_streamer_passes_plain_ds2_through() {
+        let mut decryptor = DecryptStreamer::new(None);
+        let plain = decryptor.push(b"\x03ds2rest").unwrap();
+        assert_eq!(plain, b"\x03ds2rest");
+        assert!(decryptor.finish().unwrap().is_empty());
+    }
+
+    #[test]
+    fn decrypt_streamer_passes_plain_dss_through() {
+        let mut decryptor = DecryptStreamer::new(None);
+        let plain = decryptor.push(b"\x02dssrest").unwrap();
+        assert_eq!(plain, b"\x02dssrest");
+        assert!(decryptor.finish().unwrap().is_empty());
+    }
+
+    #[test]
+    fn decrypt_streamer_rejects_unsupported_prefix() {
+        let mut decryptor = DecryptStreamer::new(None);
+        let err = decryptor.push(b"nope").unwrap_err();
+        assert!(matches!(err, DecodeError::UnsupportedFormat(_)));
+    }
+
+    #[test]
+    fn decrypting_decoder_streamer_plain_ds2_decodes() {
+        let data = make_ds2_header_only(6);
+        let mut decoder = DecryptingDecoderStreamer::new(None);
+        let samples = decoder.push(&data).unwrap();
+        assert!(samples.is_empty());
+        assert_eq!(decoder.format(), Some(AudioFormat::Ds2Qp));
+        assert_eq!(decoder.native_rate(), Some(16000));
+        assert!(decoder.finish().unwrap().is_empty());
+    }
+
+    #[test]
+    fn decrypting_decoder_streamer_push_after_finish_errors() {
+        let mut decoder = DecryptingDecoderStreamer::new(None);
+        let _ = decoder.finish().unwrap();
         let err = decoder.push(b"\x03ds2").unwrap_err();
-        assert!(matches!(err, DecodeError::EncryptedDs2(_)));
+        assert!(matches!(err, DecodeError::AlreadyFinished));
     }
 }
