@@ -51,11 +51,98 @@ struct PayloadDecryptState {
     blob: [u8; SAVED_STATE_SIZE],
 }
 
+pub(crate) struct EncryptedDs2BlockDecryptor {
+    password: Vec<u8>,
+    header_buf: Vec<u8>,
+    block_buf: Vec<u8>,
+    saved_state: Option<PayloadDecryptState>,
+    key_mode: Option<KeyMode>,
+}
+
 impl Default for PayloadDecryptState {
     fn default() -> Self {
         Self {
             blob: [0; SAVED_STATE_SIZE],
         }
+    }
+}
+
+impl EncryptedDs2BlockDecryptor {
+    pub(crate) fn new(password: &[u8]) -> Self {
+        Self {
+            password: password.to_vec(),
+            header_buf: Vec::new(),
+            block_buf: Vec::new(),
+            saved_state: None,
+            key_mode: None,
+        }
+    }
+
+    pub(crate) fn push(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+
+        if self.saved_state.is_none() {
+            self.header_buf.extend_from_slice(data);
+
+            if self.header_buf.len() >= ENCRYPTED_MAGIC.len()
+                && !self.header_buf.starts_with(&ENCRYPTED_MAGIC)
+            {
+                return Err(DecodeError::EncryptedDs2(
+                    "expected encrypted DS2 magic \\x03enc".to_string(),
+                ));
+            }
+
+            if self.header_buf.len() < DS2_HEADER_SIZE {
+                return Ok(out);
+            }
+
+            let descriptor = parse_decrypt_descriptor(&self.header_buf)?;
+            let saved_state = build_saved_state(&self.password, &descriptor)?;
+
+            self.saved_state = Some(saved_state);
+            self.key_mode = Some(descriptor.key_mode);
+
+            let mut plain_header = self.header_buf[..DS2_HEADER_SIZE].to_vec();
+            plain_header[..4].copy_from_slice(&PLAIN_MAGIC);
+            out.extend_from_slice(&plain_header);
+
+            let remainder = self.header_buf.split_off(DS2_HEADER_SIZE);
+            self.header_buf.truncate(DS2_HEADER_SIZE);
+            self.block_buf.extend_from_slice(&remainder);
+            return self.drain_full_blocks(out);
+        }
+
+        self.block_buf.extend_from_slice(data);
+        self.drain_full_blocks(out)
+    }
+
+    fn drain_full_blocks(&mut self, mut out: Vec<u8>) -> Result<Vec<u8>> {
+        while self.block_buf.len() >= DS2_BLOCK_SIZE {
+            let mut block: Vec<u8> = self.block_buf.drain(..DS2_BLOCK_SIZE).collect();
+            decrypt_record_in_place(
+                self.saved_state.as_ref().unwrap(),
+                self.key_mode.unwrap(),
+                &mut block,
+            )?;
+            out.extend_from_slice(&block);
+        }
+
+        Ok(out)
+    }
+
+    pub(crate) fn finish(&mut self) -> Result<Vec<u8>> {
+        if self.saved_state.is_none() {
+            if self.header_buf.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Err(DecodeError::Truncated("encrypted DS2 header".to_string()));
+        }
+
+        if !self.block_buf.is_empty() {
+            return Err(DecodeError::Truncated("encrypted DS2 block".to_string()));
+        }
+
+        Ok(Vec::new())
     }
 }
 
@@ -633,5 +720,53 @@ mod tests {
             .copy_from_slice(&DESC_256);
         let desc = parse_decrypt_descriptor(&header).unwrap();
         build_saved_state(b"1234", &desc).unwrap();
+    }
+
+    #[test]
+    fn encrypted_stream_decryptor_waits_for_full_header() {
+        let mut input = vec![0u8; DS2_HEADER_SIZE];
+        input[..4].copy_from_slice(&ENCRYPTED_MAGIC);
+        input[DECRYPT_DESCRIPTOR_OFFSET..DECRYPT_DESCRIPTOR_OFFSET + DECRYPT_DESCRIPTOR_SIZE]
+            .copy_from_slice(&DESC_128);
+
+        let mut decryptor = EncryptedDs2BlockDecryptor::new(b"1234");
+        assert!(decryptor.push(&input[..128]).unwrap().is_empty());
+        let plain = decryptor.push(&input[128..]).unwrap();
+        assert_eq!(&plain[..4], &PLAIN_MAGIC);
+        assert_eq!(plain.len(), DS2_HEADER_SIZE);
+    }
+
+    #[test]
+    fn encrypted_stream_decryptor_rejects_wrong_password_after_header() {
+        let mut input = vec![0u8; DS2_HEADER_SIZE];
+        input[..4].copy_from_slice(&ENCRYPTED_MAGIC);
+        input[DECRYPT_DESCRIPTOR_OFFSET..DECRYPT_DESCRIPTOR_OFFSET + DECRYPT_DESCRIPTOR_SIZE]
+            .copy_from_slice(&DESC_128);
+
+        let mut decryptor = EncryptedDs2BlockDecryptor::new(b"9999");
+        let err = decryptor.push(&input).unwrap_err();
+        assert!(matches!(err, DecodeError::EncryptedDs2(_)));
+    }
+
+    #[test]
+    fn encrypted_stream_decryptor_finish_rejects_truncated_header() {
+        let mut decryptor = EncryptedDs2BlockDecryptor::new(b"1234");
+        let _ = decryptor.push(b"\x03enc").unwrap();
+        let err = decryptor.finish().unwrap_err();
+        assert!(matches!(err, DecodeError::Truncated(_)));
+    }
+
+    #[test]
+    fn encrypted_stream_decryptor_finish_rejects_truncated_block() {
+        let mut input = vec![0u8; DS2_HEADER_SIZE];
+        input[..4].copy_from_slice(&ENCRYPTED_MAGIC);
+        input[DECRYPT_DESCRIPTOR_OFFSET..DECRYPT_DESCRIPTOR_OFFSET + DECRYPT_DESCRIPTOR_SIZE]
+            .copy_from_slice(&DESC_128);
+
+        let mut decryptor = EncryptedDs2BlockDecryptor::new(b"1234");
+        let _ = decryptor.push(&input).unwrap();
+        let _ = decryptor.push(&[0u8; 10]).unwrap();
+        let err = decryptor.finish().unwrap_err();
+        assert!(matches!(err, DecodeError::Truncated(_)));
     }
 }
