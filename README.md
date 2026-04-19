@@ -23,6 +23,9 @@ cargo build --release
 
 # Decode an encrypted DS2 file using an environment variable
 DSS_CODEC_PASSWORD=1234 ./target/release/dss-decode recording.DS2
+
+# Decrypt an encrypted DS2 file back to a plain .ds2 container
+./target/release/dss-decode --decrypt --password 1234 recording.DS2
 ```
 
 ## Supported Formats
@@ -33,7 +36,7 @@ DSS_CODEC_PASSWORD=1234 ./target/release/dss-decode recording.DS2
 | `.ds2` mode 0-1 | DS2 SP | 12000 Hz | Header `\x03ds2`, byte4 < 6 |
 | `.ds2` mode 6-7 | DS2 QP | 16000 Hz | Header `\x03ds2`, byte4 >= 6 |
 
-Encrypted DS2 files with header `\x03enc` are also supported when a password is provided.
+Encrypted DS2 files with header `\x03enc` are also supported when a password is provided, and can be either decoded directly or normalized back to a plain `.ds2` container with `--decrypt`.
 
 ## Project Structure
 
