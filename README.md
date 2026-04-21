@@ -1,4 +1,5 @@
-# Forked from https://github.com/hirparak/dss-codec
+Forked from [hirparak/dss-codec](https://github.com/hirparak/dss-codec)
+-----------
 
 | Changes | PR |
 |---------|----|
@@ -9,8 +10,8 @@
 
 ## See Also
 
- - Python Package: https://github.com/gaspardpetit/pydsscodec
- - Web Assembly Package (WASM): https://github.com/gaspardpetit/dss-codec-wasm
+ - Python Package: [gaspardpetit/pydsscodec](https://github.com/gaspardpetit/pydsscodec)
+ - Web Assembly Package (WASM): [gaspardpetit/dss-codec-wasm](https://github.com/gaspardpetit/dss-codec-wasm)
 
 -----------
 
