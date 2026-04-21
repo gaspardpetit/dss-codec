@@ -1,3 +1,19 @@
+# Forked from https://github.com/hirparak/dss-codec
+
+| Changes | PR |
+|---------|----|
+| Added CI Workflows | https://github.com/gaspardpetit/dss-codec/pull/1 |
+| Added Streaming Decoding | https://github.com/gaspardpetit/dss-codec/pull/2, https://github.com/gaspardpetit/dss-codec/pull/4 |
+| Added 128bit and 256bit decryption | https://github.com/gaspardpetit/dss-codec/pull/3, https://github.com/gaspardpetit/dss-codec/pull/5, https://github.com/gaspardpetit/dss-codec/pull/7 |
+| Added details to manifest to allow PyPI publishign | https://github.com/gaspardpetit/dss-codec/pull/6 |
+
+## See Also
+
+ - Python Package: https://github.com/gaspardpetit/pydsscodec
+ - Web Assembly Package (WASM): https://github.com/gaspardpetit/dss-codec-wasm
+
+-----------
+
 # DSS/DS2 Decoder
 
 Open-source decoder for Olympus DSS and DS2 (DSS Pro) proprietary dictation audio formats. Converts `.dss` and `.ds2` files to standard WAV.
