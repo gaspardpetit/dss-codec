@@ -6,6 +6,7 @@
 
 use crate::bitstream::BitstreamReader;
 use crate::codec::common::{decode_combinatorial_index, lattice_synthesis};
+use crate::demux::ds2::QpSegment;
 use crate::tables::ds2_qp::qp_codebook_lookup;
 use crate::tables::ds2_quant::{QP_EXCITATION_GAIN, QP_PITCH_GAIN, QP_PULSE_AMP};
 
@@ -51,6 +52,37 @@ impl Ds2QpDecoder {
             pitch_memory: vec![0.0; MAX_PITCH as usize + SUBFRAME_SIZE],
             deemph_state: 0.0,
         }
+    }
+
+    /// Reset all decoder state (lattice, pitch memory, and de-emphasis) to zero.
+    ///
+    /// This MUST be called when switching between non-contiguous recording
+    /// segments to prevent audio artifacts.
+    pub fn reset(&mut self) {
+        self.lattice_state = [0.0; NUM_COEFFS];
+        self.pitch_memory.fill(0.0);
+        self.deemph_state = 0.0;
+    }
+
+    /// Decode multiple segmented bitstream runs.
+    ///
+    /// Automatically resets state before segments marked with `reset_before`.
+    pub fn decode_segments(&mut self, segments: &[QpSegment]) -> Vec<f64> {
+        let total_cap: usize = segments
+            .iter()
+            .map(|s| s.frame_count * SAMPLES_PER_FRAME)
+            .sum();
+        let mut all_samples = Vec::with_capacity(total_cap);
+
+        for seg in segments {
+            if seg.reset_before {
+                self.reset();
+            }
+            let samples = self.decode_all_frames(&seg.stream, seg.frame_count);
+            all_samples.extend(samples);
+        }
+
+        all_samples
     }
 
     /// Decode all QP frames from a continuous bitstream. Returns all samples as f64.
