@@ -1,5 +1,6 @@
 pub mod dss;
 pub mod ds2;
+pub mod grundig;
 
 /// Detected audio format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,6 +11,8 @@ pub enum AudioFormat {
     Ds2Sp,
     /// DS2 file (.ds2), QP mode (mode byte 6-7), 16000 Hz
     Ds2Qp,
+    /// Grundig DSS file (first byte 6, magic "dss"), SP codec at 16000 Hz output
+    GrundigSp,
 }
 
 impl AudioFormat {
@@ -18,6 +21,7 @@ impl AudioFormat {
             AudioFormat::DssSp => 11025,
             AudioFormat::Ds2Sp => 12000,
             AudioFormat::Ds2Qp => 16000,
+            AudioFormat::GrundigSp => 16000,
         }
     }
 
@@ -25,6 +29,7 @@ impl AudioFormat {
         match self {
             AudioFormat::DssSp => "dss",
             AudioFormat::Ds2Sp | AudioFormat::Ds2Qp => "ds2",
+            AudioFormat::GrundigSp => "dss",
         }
     }
 }
@@ -48,6 +53,9 @@ pub enum FrameData {
 pub fn detect_format(data: &[u8]) -> Option<AudioFormat> {
     if data.len() < 4 {
         return None;
+    }
+    if data[1..4] == *b"dss" && data[0] == 6 {
+        return Some(AudioFormat::GrundigSp);
     }
     if data[1..4] == *b"dss" && (data[0] == 2 || data[0] == 3) {
         return Some(AudioFormat::DssSp);
