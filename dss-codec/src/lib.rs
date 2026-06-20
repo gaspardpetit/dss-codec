@@ -8,6 +8,7 @@ pub mod streaming;
 pub mod tables;
 
 use crate::crypto::ds2_encrypted::ENCRYPTED_MAGIC;
+use crate::demux::ds2::{demux_ds2, DemuxedDs2};
 use crate::demux::{detect_format, AudioFormat};
 use crate::error::{DecodeError, Result};
 use crate::output::resample::resample;
@@ -122,20 +123,41 @@ pub fn decode_to_buffer(data: &[u8]) -> Result<AudioBuffer> {
 
 /// Decode raw file bytes to an AudioBuffer, optionally decrypting encrypted DS2 input first.
 pub fn decode_to_buffer_with_password(data: &[u8], password: Option<&[u8]>) -> Result<AudioBuffer> {
-    let mut decoder = DecryptingDecoderStreamer::new(password);
-    let mut samples = decoder.push(data)?;
-    samples.extend(decoder.finish_lenient()?);
-
-    let format = decoder
-        .format()
-        .or_else(|| detect_format(data))
+    let plain = decrypt_to_bytes(data, password)?;
+    let format = detect_format(&plain)
         .ok_or_else(|| DecodeError::UnsupportedFormat(data.first().copied().unwrap_or(0)))?;
 
-    Ok(AudioBuffer {
-        samples,
-        native_rate: format.native_sample_rate(),
-        format,
-    })
+    match format {
+        AudioFormat::Ds2Qp => {
+            let demuxed = demux_ds2(&plain)?;
+            match demuxed {
+                DemuxedDs2::Qp {
+                    segments,
+                    total_frames: _,
+                } => {
+                    let mut decoder = crate::codec::ds2_qp::Ds2QpDecoder::new();
+                    let samples = decoder.decode_segments(&segments);
+                    Ok(AudioBuffer {
+                        samples,
+                        native_rate: 16000,
+                        format: AudioFormat::Ds2Qp,
+                    })
+                }
+                _ => Err(DecodeError::UnsupportedFormat(6)),
+            }
+        }
+        _ => {
+            let mut decoder = DecryptingDecoderStreamer::new(password);
+            let mut samples = decoder.push(data)?;
+            samples.extend(decoder.finish_lenient()?);
+
+            Ok(AudioBuffer {
+                samples,
+                native_rate: format.native_sample_rate(),
+                format,
+            })
+        }
+    }
 }
 
 /// Decode a file and write to WAV with given output configuration.

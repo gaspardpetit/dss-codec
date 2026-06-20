@@ -9,37 +9,121 @@ const DS2_BLOCK_HEADER_SIZE: usize = 6;
 const DSS_SP_PACKET_SIZE: usize = 42;
 const DS2_QP_FRAME_SIZE: usize = 56;
 
+const DS2_BLOCK_PAYLOAD_SIZE: usize = DS2_BLOCK_SIZE - DS2_BLOCK_HEADER_SIZE; // 506
+const MS_PER_FRAME: usize = 16;
+const MAX_ANNOTATIONS: usize = 32;
+
 /// Demux a DS2 file.
 /// Returns (frame_data, total_frames, is_qp).
 /// For SP: frame_data is a Vec<Vec<u8>> of packets.
-/// For QP: frame_data is a single Vec<u8> continuous bitstream.
+/// For QP: frame_data is a list of QpSegment.
 pub fn demux_ds2(data: &[u8]) -> Result<DemuxedDs2> {
-    if data.len() < 4 || data[..4] != *b"\x03ds2" {
+    if data.len() < DS2_HEADER_SIZE + DS2_BLOCK_SIZE || &data[1..4] != b"ds2" {
         return Err(DecodeError::NotDs2(std::path::PathBuf::from("<bytes>")));
     }
 
     let num_blocks = (data.len() - DS2_HEADER_SIZE) / DS2_BLOCK_SIZE;
+    if num_blocks == 0 {
+        return Err(DecodeError::Truncated("no audio data".to_string()));
+    }
     let format_type = data[DS2_HEADER_SIZE + 4];
 
-    let mut total_frames: usize = 0;
-    for bi in 0..num_blocks {
-        total_frames += data[DS2_HEADER_SIZE + bi * DS2_BLOCK_SIZE + 2] as usize;
-    }
-
     if format_type >= 6 {
-        // QP mode: continuous bitstream (no byte-swap)
-        let mut stream = Vec::new();
+        // QP mode
+        let mut raw = Vec::with_capacity(num_blocks * DS2_BLOCK_PAYLOAD_SIZE);
         for bi in 0..num_blocks {
             let bstart = DS2_HEADER_SIZE + bi * DS2_BLOCK_SIZE;
-            stream
-                .extend_from_slice(&data[bstart + DS2_BLOCK_HEADER_SIZE..bstart + DS2_BLOCK_SIZE]);
+            raw.extend_from_slice(&data[bstart + DS2_BLOCK_HEADER_SIZE..bstart + DS2_BLOCK_SIZE]);
         }
+
+        // Identify physical segments based on block header continuation markers.
+        #[derive(Copy, Clone)]
+        struct PhysSeg {
+            raw_start: usize,
+            frame_start: usize,
+            frame_count: usize,
+        }
+        let mut phys_segs = Vec::new();
+        let mut raw_read_pos = 0;
+        let mut current_seg = PhysSeg {
+            raw_start: 0,
+            frame_start: 0,
+            frame_count: 0,
+        };
+
+        for bi in 0..num_blocks {
+            let bstart = DS2_HEADER_SIZE + bi * DS2_BLOCK_SIZE;
+            let cont_bytes = data[bstart + 1] as usize * 2;
+            let frame_count = data[bstart + 2] as usize;
+            let payload_off = cont_bytes.saturating_sub(DS2_BLOCK_HEADER_SIZE);
+            let frames_raw_start = bi * DS2_BLOCK_PAYLOAD_SIZE + payload_off;
+
+            if bi == 0 {
+                raw_read_pos = frames_raw_start;
+                current_seg.raw_start = frames_raw_start;
+            } else if frames_raw_start != raw_read_pos {
+                if current_seg.frame_count > 0 {
+                    phys_segs.push(current_seg);
+                }
+                current_seg = PhysSeg {
+                    raw_start: frames_raw_start,
+                    frame_start: current_seg.frame_start + current_seg.frame_count,
+                    frame_count: 0,
+                };
+                raw_read_pos = frames_raw_start;
+            }
+            current_seg.frame_count += frame_count;
+            raw_read_pos += frame_count * DS2_QP_FRAME_SIZE;
+        }
+        if current_seg.frame_count > 0 {
+            phys_segs.push(current_seg);
+        }
+
+        let annotations = read_annotations(data);
+        let mut out_segments = Vec::new();
+        let mut total_frames_out = 0;
+        let mut is_first_segment = true;
+
+        for phys in phys_segs {
+            let mut run_start = 0;
+            let mut run_is_ann = is_annotation(phys.frame_start, &annotations);
+            for i in 1..=phys.frame_count {
+                let cur_is_ann = if i < phys.frame_count {
+                    is_annotation(phys.frame_start + i, &annotations)
+                } else {
+                    !run_is_ann
+                };
+
+                if cur_is_ann != run_is_ann {
+                    let run_len = i - run_start;
+                    if run_len > 0 {
+                        let start = phys.raw_start + run_start * DS2_QP_FRAME_SIZE;
+                        let end = start + run_len * DS2_QP_FRAME_SIZE;
+                        out_segments.push(QpSegment {
+                            stream: raw[start..end].to_vec(),
+                            frame_count: run_len,
+                            reset_before: !is_first_segment,
+                        });
+                        is_first_segment = false;
+                        total_frames_out += run_len;
+                    }
+                    run_start = i;
+                    run_is_ann = cur_is_ann;
+                }
+            }
+        }
+
         Ok(DemuxedDs2::Qp {
-            stream,
-            total_frames,
+            segments: out_segments,
+            total_frames: total_frames_out,
         })
     } else {
         // SP mode: byte-swap demuxing
+        let mut total_frames = 0;
+        for bi in 0..num_blocks {
+            total_frames += data[DS2_HEADER_SIZE + bi * DS2_BLOCK_SIZE + 2] as usize;
+        }
+
         let mut stream = Vec::new();
         for bi in 0..num_blocks {
             let bstart = DS2_HEADER_SIZE + bi * DS2_BLOCK_SIZE;
@@ -84,15 +168,56 @@ pub fn demux_ds2(data: &[u8]) -> Result<DemuxedDs2> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AnnRange {
+    first_frame: usize,
+    last_frame: usize,
+}
+
+fn read_annotations(data: &[u8]) -> Vec<AnnRange> {
+    let mut result = Vec::new();
+    let mut off = 0x400usize;
+
+    while off + 8 <= 0x500.min(data.len()) && result.len() < MAX_ANNOTATIONS {
+        let start_ms = u32::from_le_bytes(data[off..off + 4].try_into().unwrap_or([0; 4]));
+        if start_ms == 0xFFFF_FFFF {
+            break;
+        }
+        let end_ms = u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap_or([0; 4]));
+
+        result.push(AnnRange {
+            first_frame: start_ms as usize / MS_PER_FRAME,
+            last_frame: end_ms as usize / MS_PER_FRAME,
+        });
+        off += 8;
+    }
+    result
+}
+
+#[inline]
+fn is_annotation(abs_frame: usize, annotations: &[AnnRange]) -> bool {
+    annotations
+        .iter()
+        .any(|a| abs_frame >= a.first_frame && abs_frame < a.last_frame)
+}
+
 pub enum DemuxedDs2 {
     Sp {
         packets: Vec<Vec<u8>>,
         total_frames: usize,
     },
     Qp {
-        stream: Vec<u8>,
+        segments: Vec<QpSegment>,
         total_frames: usize,
     },
+}
+
+/// One uninterrupted run of QP frames ready for the bitstream decoder.
+pub struct QpSegment {
+    pub stream: Vec<u8>,
+    pub frame_count: usize,
+    /// True -> decoder must call `reset()` before processing this segment.
+    pub reset_before: bool,
 }
 
 pub(crate) struct Ds2SpStreamDemuxer {
@@ -374,10 +499,11 @@ mod tests {
         let data = make_ds2_file(6, 3, 0x40);
         let expected = match demux_ds2(&data).unwrap() {
             DemuxedDs2::Qp {
-                stream,
-                total_frames,
-            } => stream[..total_frames * DS2_QP_FRAME_SIZE]
-                .chunks(DS2_QP_FRAME_SIZE)
+                segments,
+                total_frames: _,
+            } => segments
+                .iter()
+                .flat_map(|s| s.stream.chunks(DS2_QP_FRAME_SIZE))
                 .map(|chunk| chunk.to_vec())
                 .collect::<Vec<_>>(),
             _ => panic!("expected DS2 QP stream"),
