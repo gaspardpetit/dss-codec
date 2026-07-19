@@ -159,3 +159,24 @@ fn test_decode_encrypted_ds2_aes256_matches_golden() {
         "aes256",
     );
 }
+
+#[test]
+fn test_decode_grundig_digta7_qp7_regression() {
+    let data = include_bytes!("fixtures/grundig_digta7_qp7.ds2");
+    let buf = dss_codec::decode_to_buffer(data).unwrap();
+
+    assert_eq!(buf.format, dss_codec::demux::AudioFormat::Ds2Qp7);
+    assert_eq!(buf.native_rate, 16000);
+    assert_eq!(buf.samples.len(), 488_960);
+
+    // FNV-1a over the little-endian 16-bit PCM emitted by the default WAV path.
+    let mut hash = 0xcbf29ce484222325u64;
+    for sample in buf.samples {
+        let pcm = sample.clamp(-32768.0, 32767.0) as i16;
+        for byte in pcm.to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    assert_eq!(hash, 0x0c0aa0026493baa9);
+}
