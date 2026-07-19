@@ -118,3 +118,44 @@ fn test_decode_grundig_sp_bit_exact() {
     let _ = std::fs::remove_file(&in_path);
     let _ = std::fs::remove_file(&out_path);
 }
+
+fn assert_encrypted_ds2_matches_golden(input: &[u8], reference: &[u8], mode: &str) {
+    let buf = dss_codec::decode_to_buffer_with_password(input, Some(b"1234")).unwrap();
+    assert!(matches!(
+        buf.format,
+        dss_codec::demux::AudioFormat::Ds2Qp | dss_codec::demux::AudioFormat::Ds2Qp7
+    ));
+    assert_eq!(buf.native_rate, 16000);
+
+    let out_path = std::env::temp_dir().join(format!(
+        "dss_codec_encrypted_{mode}_{}_out.wav",
+        std::process::id()
+    ));
+    dss_codec::output::wav::write_wav(&out_path, &buf.samples, buf.native_rate, 16, 1).unwrap();
+
+    let produced = std::fs::read(&out_path).unwrap();
+    assert_eq!(
+        produced, reference,
+        "encrypted DS2 {mode} output changed from the reviewed golden WAV"
+    );
+
+    let _ = std::fs::remove_file(out_path);
+}
+
+#[test]
+fn test_decode_encrypted_ds2_aes128_matches_golden() {
+    assert_encrypted_ds2_matches_golden(
+        include_bytes!("fixtures/encrypted_aes128.ds2"),
+        include_bytes!("fixtures/encrypted_aes128_reference.wav"),
+        "aes128",
+    );
+}
+
+#[test]
+fn test_decode_encrypted_ds2_aes256_matches_golden() {
+    assert_encrypted_ds2_matches_golden(
+        include_bytes!("fixtures/encrypted_aes256.ds2"),
+        include_bytes!("fixtures/encrypted_aes256_reference.wav"),
+        "aes256",
+    );
+}
