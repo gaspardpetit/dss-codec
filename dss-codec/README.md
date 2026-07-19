@@ -9,8 +9,10 @@ Replaces the Wine + Olympus DirectShow + NCH Switch pipeline with a standalone b
 | Format | Extension | Sample Rate | Quality | Bit Rate |
 |--------|-----------|-------------|---------|----------|
 | DSS SP | `.dss` | 11025 Hz | Standard | ~13.7 kbps |
+| Grundig DSS SP (PH9607) | `.dss` | 16000 Hz | Standard | — |
 | DS2 SP | `.ds2` (mode 0) | 12000 Hz | Standard | ~13.7 kbps |
 | DS2 QP | `.ds2` (mode 6) | 16000 Hz | Quality | ~28 kbps |
+| DS2 QP7 | `.ds2` (mode 7) | 16000 Hz | Quality | — |
 
 Format is auto-detected from the file header.
 
@@ -73,8 +75,10 @@ use dss_codec::{
     decode_and_write,
     decrypt_file,
     decrypt_to_bytes,
+    inspect_bytes,
     AudioBuffer,
 };
+use dss_codec::streaming::DecryptingDecoderStreamer;
 use dss_codec::output::OutputConfig;
 use std::path::Path;
 
@@ -93,6 +97,18 @@ let buf = decode_to_buffer_with_password(&encrypted, Some(b"1234"))?;
 // Normalize to plain container bytes (plain input passes through unchanged)
 let plain_ds2 = decrypt_file(Path::new("encrypted.ds2"), Some(b"1234"))?;
 let plain_bytes = decrypt_to_bytes(&encrypted, Some(b"1234"))?;
+
+// Inspect format and encryption metadata without decoding
+let info = inspect_bytes(&encrypted)?;
+println!("Format: {:?}, encryption: {:?}", info.format, info.encryption);
+
+// Incrementally decrypt and decode input received in chunks
+let mut decoder = DecryptingDecoderStreamer::new(Some(b"1234"));
+let mut samples = Vec::new();
+for chunk in encrypted.chunks(4096) {
+    samples.extend(decoder.push(chunk)?);
+}
+samples.extend(decoder.finish()?);
 
 // Decode and write WAV with custom settings
 let config = OutputConfig {
@@ -113,7 +129,7 @@ decode_and_write(
 pub struct AudioBuffer {
     pub samples: Vec<f64>,     // Mono samples (f64 internally)
     pub native_rate: u32,      // Native sample rate before resampling
-    pub format: AudioFormat,   // Detected format (DssSp, Ds2Sp, Ds2Qp)
+    pub format: AudioFormat,   // DssSp, GrundigSp, Ds2Sp, Ds2Qp, or Ds2Qp7
 }
 ```
 
@@ -126,15 +142,17 @@ Input File
 [Demuxer] ─── detect_format() → AudioFormat
     |
     ├── DSS: block-aware byte-swap demuxer → 42-byte packets
+    ├── Grundig DSS: PH9607 block demuxer → codec packets
     ├── DS2 SP: byte-swap demuxer → 42-byte packets
-    └── DS2 QP: continuous bitstream concatenation
+    └── DS2 QP/QP7: segmented bitstream extraction
     |
     v
 [Decoder] ─── per-format CELP decoder
     |
     ├── DSS SP: Q15 integer, Levinson, noise modulation, sinc resample
+    ├── Grundig DSS SP: PH9607 CELP decode and 16 kHz output
     ├── DS2 SP: f64, lattice synthesis, C(72,7) codebook
-    └── DS2 QP: f64, lattice synthesis, C(64,11) codebook, de-emphasis
+    └── DS2 QP/QP7: f64 lattice synthesis and mode-specific excitation
     |
     v
 AudioBuffer (f64 samples at native rate)
@@ -143,7 +161,7 @@ AudioBuffer (f64 samples at native rate)
 [Output] ─── optional resample (rubato) → WAV (hound)
 ```
 
-All three decoders implement CELP (Code-Excited Linear Prediction) with:
+The decoders implement CELP (Code-Excited Linear Prediction) with:
 - Reflection coefficient codebooks for spectral envelope
 - Pitch-adaptive excitation (long-term prediction)
 - Combinatorial fixed codebook excitation (short-term)

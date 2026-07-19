@@ -6,7 +6,7 @@ Forked from [hirparak/dss-codec](https://github.com/hirparak/dss-codec)
 | Added CI Workflows | https://github.com/gaspardpetit/dss-codec/pull/1 |
 | Added Streaming Decoding | https://github.com/gaspardpetit/dss-codec/pull/2, https://github.com/gaspardpetit/dss-codec/pull/4 |
 | Added 128bit and 256bit decryption | https://github.com/gaspardpetit/dss-codec/pull/3, https://github.com/gaspardpetit/dss-codec/pull/5, https://github.com/gaspardpetit/dss-codec/pull/7 |
-| Added details to manifest to allow PyPI publishing | https://github.com/gaspardpetit/dss-codec/pull/6 |
+| Added package metadata for publishing the Rust crate | https://github.com/gaspardpetit/dss-codec/pull/6 |
 
 ## See Also
 
@@ -50,10 +50,14 @@ DSS_CODEC_PASSWORD=1234 ./target/release/dss-decode recording.DS2
 | File Type | Codec | Native Rate | Detection |
 |-----------|-------|-------------|-----------|
 | `.dss` (v2/v3) | DSS SP | 11025 Hz | Header `{02\|03}dss` |
-| `.ds2` mode 0-1 | DS2 SP | 12000 Hz | Header `\x03ds2`, byte4 < 6 |
-| `.ds2` mode 6-7 | DS2 QP | 16000 Hz | Header `\x03ds2`, byte4 >= 6 |
+| `.dss` (Grundig/PH9607) | Grundig DSS SP | 16000 Hz | Header `\x06dss` |
+| `.ds2` mode 0-1 | DS2 SP | 12000 Hz | DS2 header, format type 0-1 |
+| `.ds2` mode 6 | DS2 QP | 16000 Hz | DS2 header, format type 6 |
+| `.ds2` mode 7 | DS2 QP7 | 16000 Hz | DS2 header, format type 7 |
 
-Encrypted DS2 files with header `\x03enc` are also supported when a password is provided, and can be either decoded directly or normalized back to a plain `.ds2` container with `--decrypt`.
+DS2 container variants with `\x01ds2`, `\x03ds2`, and `\x07ds2` headers are recognized. Encrypted DS2 files with header `\x03enc` are also supported when a password is provided, and can be either decoded directly or normalized back to a plain `.ds2` container with `--decrypt`.
+
+The Rust library also provides incremental decoding, decryption, and combined decrypting-decoder stream APIs for callers that receive input in chunks.
 
 ## Project Structure
 
@@ -62,6 +66,7 @@ Encrypted DS2 files with header `\x03enc` are also supported when a password is 
 | `dss-codec/` | Rust crate — native decoder (CLI + library). ~140x faster than Python. |
 | `dss_decode.py` | Python DSS SP reference decoder (requires numpy) |
 | `ds2decode.py` | Python DS2 SP/QP reference decoder (requires numpy) |
+| `ds2decrypt.py` | Python encrypted DS2 reference utility |
 | `ds2_lsp_codebook.npz` | SP reflection coefficient codebook (used by Python decoder) |
 | `ds2_qp_codebook.npz` | QP reflection coefficient codebook (used by Python decoder) |
 | `dss-codec/CODEC_SPECIFICATION.md` | Complete codec specification with all algorithms, tables, and DLL addresses |
@@ -78,7 +83,7 @@ See [`dss-codec/CODEC_SPECIFICATION.md`](dss-codec/CODEC_SPECIFICATION.md) for t
 
 - File format and block structure
 - Bitstream reader specification
-- Frame bit allocations for all three codecs
+- Frame bit allocations for the supported codecs
 - All algorithms in pseudocode (combinatorial codebook, pitch decoding, lattice synthesis)
 - Complete quantization and codebook tables
 - DLL function address map
